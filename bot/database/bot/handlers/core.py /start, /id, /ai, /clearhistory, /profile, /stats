@@ -1,0 +1,165 @@
+
+from aiogram import Router, F
+from aiogram.filters import Command
+from aiogram.types import Message
+
+from bot.config import BOT_NAME
+from bot.services.ai import ask_ai
+from bot.database.db import (
+    save_user,
+    add_message,
+    get_history,
+    clear_history,
+    get_stats
+)
+
+router = Router()
+
+
+@router.message(Command("start"))
+async def start_command(message: Message):
+    user = message.from_user
+
+    if user:
+        await save_user(
+            user.id,
+            user.username,
+            user.first_name
+        )
+
+    await message.answer(
+        f"👑 Welcome to {BOT_NAME}!\n\n"
+        "Main tumhara AI assistant hoon.\n"
+        "Mujhse naturally baat kar sakte ho.\n\n"
+        "Commands:\n"
+        "/ai - AI se baat karo\n"
+        "/id - Telegram ID\n"
+        "/profile - Profile\n"
+        "/stats - Bot statistics\n"
+        "/clearhistory - Chat memory clear"
+    )
+
+
+@router.message(Command("id"))
+async def id_command(message: Message):
+    await message.answer(
+        f"🆔 Your ID: {message.from_user.id}\n"
+        f"💬 Chat ID: {message.chat.id}"
+    )
+
+
+@router.message(Command("ai"))
+async def ai_command(message: Message):
+    prompt = (message.text or "").partition(" ")[2].strip()
+
+    if not prompt:
+        await message.answer(
+            "AI ko message likho.\nExample: /ai Hello, kaise ho?"
+        )
+        return
+
+    user = message.from_user
+
+    await save_user(
+        user.id,
+        user.username,
+        user.first_name
+    )
+
+    history = await get_history(user.id, message.chat.id)
+
+    await message.bot.send_chat_action(
+        message.chat.id, "typing"
+    )
+
+    answer = await ask_ai(prompt, history)
+
+    await add_message(
+        user.id, message.chat.id, "user", prompt
+    )
+
+    await add_message(
+        user.id, message.chat.id, "assistant", answer
+    )
+
+    await message.answer(answer)
+
+
+@router.message(Command("clearhistory"))
+async def clear_command(message: Message):
+    await clear_history(
+        message.from_user.id,
+        message.chat.id
+    )
+
+    await message.answer(
+        "🧹 Tumhari AI conversation memory clear ho gayi."
+    )
+
+
+@router.message(Command("profile"))
+async def profile_command(message: Message):
+    user = message.from_user
+
+    await save_user(
+        user.id,
+        user.username,
+        user.first_name
+    )
+
+    await message.answer(
+        f"👤 Profile\n\n"
+        f"Name: {user.full_name}\n"
+        f"Username: @{user.username or 'Not set'}\n"
+        f"ID: {user.id}\n"
+        f"Language: {user.language_code or 'Unknown'}"
+    )
+
+
+@router.message(Command("stats"))
+async def stats_command(message: Message):
+    stats = await get_stats()
+
+    await message.answer(
+        "📊 BOT STATISTICS\n\n"
+        f"Registered users: {stats['users']}\n"
+        f"Saved AI messages: {stats['messages']}"
+    )
+
+
+# Automatic AI conversation in private chats.
+# Group messages are not automatically sent to AI.
+@router.message(
+    F.chat.type == "private",
+    F.text,
+    ~F.text.startswith("/")
+)
+async def automatic_ai_reply(message: Message):
+    user = message.from_user
+
+    if not user or not message.text:
+        return
+
+    await save_user(
+        user.id,
+        user.username,
+        user.first_name
+    )
+
+    history = await get_history(user.id, message.chat.id)
+
+    await message.bot.send_chat_action(
+        message.chat.id, "typing"
+    )
+
+    answer = await ask_ai(message.text, history)
+
+    await add_message(
+        user.id, message.chat.id, "user", message.text
+    )
+
+    await add_message(
+        user.id, message.chat.id, "assistant", answer
+    )
+
+    await message.answer(answer)
