@@ -1,188 +1,294 @@
-import re, time
+
+import re
+import time
+from collections import defaultdict
+
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, ChatMemberUpdated
-from aiogram.exceptions import TelegramBadRequest
-from bot.database.db import ensure_group, group, set_group_field, set_setting, get_setting, execute, fetchone, fetchall
+from aiogram.types import Message, ChatPermissions
 
-router=Router()
+from bot.database.group_db import get_group, update_group
 
-def is_group(m): return m.chat.type in ('group','supergroup')
-async def admin_ok(m):
-    if not is_group(m): return False
-    member=await m.bot.get_chat_member(m.chat.id,m.from_user.id)
-    return member.status in ('administrator','creator')
-async def require_admin(m):
-    if not is_group(m): await m.answer('Ye command group mein use karo.'); return False
-    if not await admin_ok(m): await m.answer('Sirf group admins use kar sakte hain.'); return False
-    await ensure_group(m.chat); return True
+router = Router(name="groups")
 
-@router.message(Command('gclock'))
-async def lock_title(m:Message):
-    if not await require_admin(m): return
-    await set_group_field(m.chat.id,'saved_title',m.chat.title or '')
-    await set_group_field(m.chat.id,'title_lock',1)
-    await m.answer('🔒 Group title lock ON. Bot ko Manage Chat Info permission do.')
+_WARNINGS = defaultdict(int)
+_LAST_MESSAGE = {}
 
-@router.message(Command('gcunlock'))
-async def unlock_title(m:Message):
-    if not await require_admin(m): return
-    await set_group_field(m.chat.id,'title_lock',0); await m.answer('🔓 Group title lock OFF.')
 
-@router.message(Command('setgclock'))
-async def set_locked_title(m:Message):
-    if not await require_admin(m): return
-    title=m.text.partition(' ')[2].strip()
-    if not title: return await m.reply('Use: /setgclock New Group Name')
-    if len(title)>128: return await m.reply('Title max 128 characters.')
-    await set_group_field(m.chat.id,'saved_title',title)
+async def is_admin(message: Message) -> bool:
+    if not message.from_user:
+        return False
     try:
-        await m.bot.set_chat_title(m.chat.id,title)
-        await set_group_field(m.chat.id,'title_lock',1)
-        await m.answer('✅ Locked title saved and applied.')
-    except TelegramBadRequest as e: await m.answer(f'Title change failed. Check bot admin permission. ({e.message})')
+        member = await message.bot.get_chat_member(
+            message.chat.id, message.from_user.id
+        )
+        return member.status in ("creator", "administrator")
+    except Exception:
+        return False
 
-@router.message(Command('lockstatus'))
-async def lock_status(m:Message):
-    if not is_group(m): return await m.answer('Group only.')
-    await ensure_group(m.chat); row=await group(m.chat.id)
-    await m.answer(f"Title lock: {'ON' if row[3] else 'OFF'}\nSaved title: {row[2] or '-'}")
 
-async def toggle(m, field, label):
-    if not await require_admin(m): return
-    arg=m.text.split(maxsplit=1)[1].lower() if len(m.text.split())>1 else ''
-    if arg not in ('on','off'): return await m.reply(f'Use: /{label.lower().replace(" ","")} on|off')
-    await set_group_field(m.chat.id,field,1 if arg=='on' else 0)
-    await m.answer(f'{label}: {arg.upper()}')
+async def group_row(chat_id: int):
+    return await get_group(chat_id)
 
-@router.message(Command('antilink'))
-async def antilink(m): await toggle(m,'antilink','Anti-link')
-@router.message(Command('antiflood'))
-async def antiflood(m): await toggle(m,'antiflood','Anti-flood')
-@router.message(Command('welcome'))
-async def welcome_toggle(m): await toggle(m,'welcome','Welcome')
 
-@router.message(Command('setwelcome'))
-async def set_welcome(m):
-    if not await require_admin(m): return
-    val=m.text.partition(' ')[2].strip()
-    if not val: return await m.reply('Use {name} for member name. Example: /setwelcome Welcome {name}!')
-    await set_group_field(m.chat.id,'welcome_text',val[:1000]); await m.answer('Welcome message updated.')
+async def setting(chat_id: int, index: int, default=0):
+    row = await group_row(chat_id)
+    return row[index] if row else default
 
-@router.message(Command('rules'))
-async def rules(m):
-    if not is_group(m): return await m.answer('Group only.')
-    val=await get_setting(m.chat.id,'rules','Rules abhi set nahi hain.')
-    await m.answer(val)
 
-@router.message(Command('setrules'))
-async def set_rules(m):
-    if not await require_admin(m): return
-    val=m.text.partition(' ')[2].strip()
-    if not val: return await m.reply('Use: /setrules Your group rules')
-    await set_setting(m.chat.id,'rules',val[:4000]); await m.answer('Group rules saved.')
+def reply_target(message: Message):
+    if not message.reply_to_message:
+        return None
+    return message.reply_to_message.from_user
 
-@router.message(Command('note'))
-async def note(m):
-    if not await require_admin(m): return
-    parts=m.text.split(maxsplit=2)
-    if len(parts)<3: return await m.reply('Use: /note name note text')
-    await execute('INSERT INTO notes(chat_id,name,value) VALUES(?,?,?) ON CONFLICT(chat_id,name) DO UPDATE SET value=excluded.value',(m.chat.id,parts[1].lower(),parts[2][:3000]))
-    await m.answer(f'Note {parts[1]} saved.')
 
-@router.message(Command('get'))
-async def get_note(m):
-    if not is_group(m): return
-    name=m.text.partition(' ')[2].strip().lower()
-    row=await fetchone('SELECT value FROM notes WHERE chat_id=? AND name=?',(m.chat.id,name))
-    await m.answer(row[0] if row else 'Note nahi mila.')
+@router.message(Command("rules"))
+async def show_rules(message: Message):
+    row = await group_row(message.chat.id)
+    rules = row[6] if row and row[6] else "Abhi group rules set nahi kiye gaye."
+    await message.answer(f"📜 **Group Rules**\n\n{rules}")
 
-@router.message(Command('notes'))
-async def notes(m):
-    if not is_group(m): return
-    rows=await fetchall('SELECT name FROM notes WHERE chat_id=? ORDER BY name',(m.chat.id,))
-    await m.answer('Saved notes: '+(', '.join(r[0] for r in rows) if rows else 'none'))
 
-@router.message(Command('warn','warnings','clearwarns','kick','ban','unban','mute','unmute','del','pin','unpin'))
-async def moderation(m:Message):
-    if not await require_admin(m): return
-    cmd=m.text.split()[0][1:]
-    target=m.reply_to_message.from_user if m.reply_to_message else None
-    if cmd in ('del','pin','unpin'):
+@router.message(Command("setrules"))
+async def set_rules(message: Message):
+    if not await is_admin(message):
+        return await message.reply("❌ Sirf group admins rules set kar sakte hain.")
+
+    rules = (message.text or "").partition(" ")[2].strip()
+    if not rules:
+        return await message.reply("Usage: /setrules Rules yahan likho")
+
+    await update_group(message.chat.id, rules=rules)
+    await message.reply("✅ Group rules save ho gaye.")
+
+
+@router.message(Command("antilink"))
+async def anti_link_toggle(message: Message):
+    if not await is_admin(message):
+        return await message.reply("❌ Admin only command.")
+
+    arg = (message.text or "").partition(" ")[2].strip().lower()
+    if arg not in ("on", "off"):
+        return await message.reply("Usage: /antilink on  ya  /antilink off")
+
+    await update_group(message.chat.id, anti_link=int(arg == "on"))
+    await message.reply(f"🔗 Anti-link {arg.upper()}.")
+
+
+@router.message(Command("antiflood"))
+async def anti_flood_toggle(message: Message):
+    if not await is_admin(message):
+        return await message.reply("❌ Admin only command.")
+
+    arg = (message.text or "").partition(" ")[2].strip().lower()
+    if arg not in ("on", "off"):
+        return await message.reply("Usage: /antiflood on  ya  /antiflood off")
+
+    await update_group(message.chat.id, anti_flood=int(arg == "on"))
+    await message.reply(f"⚡ Anti-flood {arg.upper()}.")
+
+
+@router.message(Command("welcome"))
+async def welcome_toggle(message: Message):
+    if not await is_admin(message):
+        return await message.reply("❌ Admin only command.")
+
+    arg = (message.text or "").partition(" ")[2].strip().lower()
+    if arg not in ("on", "off"):
+        return await message.reply("Usage: /welcome on  ya  /welcome off")
+
+    await update_group(message.chat.id, welcome=int(arg == "on"))
+    await message.reply(f"👋 Welcome messages {arg.upper()}.")
+
+
+@router.message(Command("warn"))
+async def warn_user(message: Message):
+    if not await is_admin(message):
+        return await message.reply("❌ Admin only command.")
+
+    target = reply_target(message)
+    if not target or target.is_bot:
+        return await message.reply("Jis member ko warn karna hai uske message par reply karo.")
+
+    _WARNINGS[(message.chat.id, target.id)] += 1
+    count = _WARNINGS[(message.chat.id, target.id)]
+
+    await message.reply(
+        f"⚠️ {target.full_name} ko warning mili.\n"
+        f"Warnings: {count}/3"
+    )
+
+    if count >= 3:
         try:
-            if cmd=='del':
-                if not m.reply_to_message: return await m.reply('Kisi message par reply karke /del likho.')
-                await m.bot.delete_message(m.chat.id,m.reply_to_message.message_id)
-            elif cmd=='pin':
-                if not m.reply_to_message: return await m.reply('Reply karke /pin likho.')
-                await m.bot.pin_chat_message(m.chat.id,m.reply_to_message.message_id)
-            else: await m.bot.unpin_chat_message(m.chat.id)
-            return
-        except TelegramBadRequest as e: return await m.answer(f'Action failed: {e.message}')
-    if cmd=='unban':
-        try:
-            uid=int(m.text.split(maxsplit=1)[1]); await m.bot.unban_chat_member(m.chat.id,uid); return await m.answer('User unbanned.')
-        except Exception: return await m.reply('Use: /unban USER_ID')
-    if not target: return await m.reply('Target member ke message par reply karo.')
-    if target.id==m.from_user.id: return await m.reply('Khud par ye action nahi kar sakte.')
-    if cmd=='warnings':
-        row=await fetchone('SELECT count FROM warnings WHERE chat_id=? AND user_id=?',(m.chat.id,target.id)); return await m.answer(f'Warnings: {row[0] if row else 0}')
-    if cmd=='clearwarns':
-        await execute('DELETE FROM warnings WHERE chat_id=? AND user_id=?',(m.chat.id,target.id)); return await m.answer('Warnings cleared.')
+            await message.bot.ban_chat_member(message.chat.id, target.id)
+            _WARNINGS[(message.chat.id, target.id)] = 0
+            await message.answer(f"🚫 {target.full_name} ko 3 warnings ke baad group se ban kiya gaya.")
+        except Exception:
+            await message.answer("⚠️ 3 warnings ho gayi, lekin bot member ko ban nahi kar paya. Admin permissions check karo.")
+
+
+@router.message(Command("resetwarn"))
+async def reset_warn(message: Message):
+    if not await is_admin(message):
+        return await message.reply("❌ Admin only command.")
+
+    target = reply_target(message)
+    if not target:
+        return await message.reply("Member ke message par reply karke /resetwarn bhejo.")
+
+    _WARNINGS[(message.chat.id, target.id)] = 0
+    await message.reply("✅ Member ki warnings reset ho gayi.")
+
+
+@router.message(Command("mute"))
+async def mute_user(message: Message):
+    if not await is_admin(message):
+        return await message.reply("❌ Admin only command.")
+
+    target = reply_target(message)
+    if not target or target.is_bot:
+        return await message.reply("Member ke message par reply karke /mute bhejo.")
+
     try:
-        if cmd=='warn':
-            await execute('INSERT INTO warnings(chat_id,user_id,count) VALUES(?,?,1) ON CONFLICT(chat_id,user_id) DO UPDATE SET count=count+1',(m.chat.id,target.id))
-            row=await fetchone('SELECT count FROM warnings WHERE chat_id=? AND user_id=?',(m.chat.id,target.id)); return await m.answer(f'⚠️ {target.full_name}: warning {row[0]}/3')
-        if cmd=='kick': await m.bot.ban_chat_member(m.chat.id,target.id); await m.bot.unban_chat_member(m.chat.id,target.id); return await m.answer('Member removed.')
-        if cmd=='ban': await m.bot.ban_chat_member(m.chat.id,target.id); return await m.answer('Member banned.')
-        if cmd=='mute':
-            minutes=int(m.text.split(maxsplit=1)[1]); minutes=max(1,min(minutes,10080))
-            from datetime import datetime, timedelta, timezone
-            await m.bot.restrict_chat_member(m.chat.id,target.id, permissions=__import__('aiogram').types.ChatPermissions(can_send_messages=False), until_date=datetime.now(timezone.utc)+timedelta(minutes=minutes))
-            return await m.answer(f'Member muted for {minutes} minutes.')
-        if cmd=='unmute':
-            from aiogram.types import ChatPermissions
-            await m.bot.restrict_chat_member(m.chat.id,target.id,permissions=ChatPermissions(can_send_messages=True,can_send_audios=True,can_send_documents=True,can_send_photos=True,can_send_videos=True,can_send_video_notes=True,can_send_voice_notes=True,can_send_polls=True,can_send_other_messages=True,can_add_web_page_previews=True)); return await m.answer('Member unmuted.')
-    except (ValueError,TelegramBadRequest) as e: await m.answer(f'Action failed: {e}')
+        await message.bot.restrict_chat_member(
+            message.chat.id,
+            target.id,
+            permissions=ChatPermissions(can_send_messages=False)
+        )
+        await message.reply(f"🔇 {target.full_name} muted.")
+    except Exception as exc:
+        await message.reply(f"❌ Mute nahi hua. Bot admin permissions check karo. ({type(exc).__name__})")
+
+
+@router.message(Command("unmute"))
+async def unmute_user(message: Message):
+    if not await is_admin(message):
+        return await message.reply("❌ Admin only command.")
+
+    target = reply_target(message)
+    if not target:
+        return await message.reply("Member ke message par reply karke /unmute bhejo.")
+
+    try:
+        await message.bot.restrict_chat_member(
+            message.chat.id,
+            target.id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_video_notes=True,
+                can_send_voice_notes=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
+            )
+        )
+        await message.reply(f"🔊 {target.full_name} unmuted.")
+    except Exception as exc:
+        await message.reply(f"❌ Unmute nahi hua. ({type(exc).__name__})")
+
+
+@router.message(Command("kick"))
+async def kick_user(message: Message):
+    if not await is_admin(message):
+        return await message.reply("❌ Admin only command.")
+
+    target = reply_target(message)
+    if not target or target.is_bot:
+        return await message.reply("Member ke message par reply karke /kick bhejo.")
+
+    try:
+        await message.bot.ban_chat_member(message.chat.id, target.id)
+        await message.bot.unban_chat_member(
+            message.chat.id, target.id, only_if_banned=True
+        )
+        await message.reply(f"👢 {target.full_name} ko group se remove kiya.")
+    except Exception as exc:
+        await message.reply(f"❌ Kick nahi hua. ({type(exc).__name__})")
+
+
+@router.message(Command("ban"))
+async def ban_user(message: Message):
+    if not await is_admin(message):
+        return await message.reply("❌ Admin only command.")
+
+    target = reply_target(message)
+    if not target or target.is_bot:
+        return await message.reply("Member ke message par reply karke /ban bhejo.")
+
+    try:
+        await message.bot.ban_chat_member(message.chat.id, target.id)
+        await message.reply(f"🚫 {target.full_name} banned.")
+    except Exception as exc:
+        await message.reply(f"❌ Ban nahi hua. ({type(exc).__name__})")
+
+
+@router.message(Command("unban"))
+async def unban_user(message: Message):
+    if not await is_admin(message):
+        return await message.reply("❌ Admin only command.")
+
+    arg = (message.text or "").partition(" ")[2].strip()
+    if not arg.lstrip("-").isdigit():
+        return await message.reply("Usage: /unban USER_ID")
+
+    try:
+        await message.bot.unban_chat_member(
+            message.chat.id, int(arg), only_if_banned=True
+        )
+        await message.reply("✅ User unbanned.")
+    except Exception as exc:
+        await message.reply(f"❌ Unban nahi hua. ({type(exc).__name__})")
+
 
 @router.message(F.new_chat_members)
-async def greet(m:Message):
-    await ensure_group(m.chat); row=await group(m.chat.id)
-    if row and row[6]:
-        for u in m.new_chat_members:
-            try: await m.answer(row[7].replace('{name}',u.full_name))
-            except Exception: pass
-
-@router.message(F.left_chat_member)
-async def goodbye(m:Message):
-    await m.answer(f'Goodbye {m.left_chat_member.full_name}!')
-
-@router.message(F.chat.type.in_({'group','supergroup'}))
-async def group_guard(m:Message):
-    if not m.from_user or m.from_user.is_bot: return
-    await ensure_group(m.chat); row=await group(m.chat.id)
-    if not row: return
-    # Never moderate administrators or the group creator.
-    try:
-        member=await m.bot.get_chat_member(m.chat.id,m.from_user.id)
-        if member.status in ('administrator','creator'): return
-    except Exception: pass
-    if row[3] and m.chat.title != row[2]:
-        try: await m.bot.set_chat_title(m.chat.id,row[2])
-        except Exception: pass
-    if row[4] and m.text and re.search(r'(https?://|www\.|t\.me/)',m.text,re.I):
-        try: await m.delete()
-        except Exception: pass
+async def welcome_new_members(message: Message):
+    enabled = await setting(message.chat.id, 5, 1)
+    if not enabled:
         return
-    if row[5]:
-        now=time.time(); key=f'flood:{m.chat.id}:{m.from_user.id}'
-        last=float(await get_setting(m.chat.id,key,'0'))
-        await set_setting(m.chat.id,key,str(now))
-        if now-last < 1.2:
-            try: await m.delete()
-            except Exception: pass
 
-@router.chat_member()
-async def title_watch(event:ChatMemberUpdated):
-    # Telegram does not expose every title change as a chat_member update; guard also checks incoming messages.
-    await ensure_group(event.chat)
+    for member in message.new_chat_members:
+        if not member.is_bot:
+            await message.answer(
+                f"👋 Welcome {member.full_name}!\n"
+                "Group mein aapka swagat hai. /rules padh lena."
+            )
+
+
+@router.message(F.text)
+async def group_protection(message: Message):
+    if message.chat.type not in ("group", "supergroup"):
+        return
+    if not message.from_user or await is_admin(message):
+        return
+
+    row = await group_row(message.chat.id)
+    anti_link = bool(row[3]) if row else False
+    anti_flood = bool(row[4]) if row else True
+
+    if anti_link and re.search(
+        r"(https?://|www\.|t\.me/|telegram\.me/)",
+        message.text or "",
+        re.IGNORECASE
+    ):
+        try:
+            await message.delete()
+            await message.answer("🔗 Links allowed nahi hain.")
+        except Exception:
+            pass
+        return
+
+    if anti_flood:
+        key = (message.chat.id, message.from_user.id)
+        now = time.monotonic()
+        previous = _LAST_MESSAGE.get(key, 0)
+
+        if now - previous < 0.8:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+        _LAST_MESSAGE[key] = now
