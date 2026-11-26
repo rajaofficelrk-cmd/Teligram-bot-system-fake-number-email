@@ -1,11 +1,10 @@
-
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+BOT_TOKEN = os.getenv("BOT_TOKEN",8888610900:AAHLZ7c3Wh-CYZ-YjlrDu3rwdvQcduV5T_0"")
+OWNER_ID = int(os.getenv("OWNER_ID",@RKRAJA7065"0"))
 
 BOT_NAME = os.getenv("BOT_NAME", "RK RAJA ULTIMATE XWD")
 
